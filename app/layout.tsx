@@ -1,14 +1,13 @@
 import '@/app/ui/global.css';
-import { inter } from '@/app/ui/fonts';
+import { notoSansJP } from '@/app/ui/fonts';
 import { Metadata } from 'next';
 
 export const metadata: Metadata = {
   title: {
-    template: '%s | Acme Dashboard',
-    default: 'Acme Dashboard',
+    template: '%s | My BlueSky',
+    default: 'My BlueSky',
   },
-  description: 'The official Next.js Learn Dashboard built with App Router.',
-  metadataBase: new URL('https://next-learn-dashboard.vercel.sh'),
+  description: 'My BlueSky',
 };
 
 export default function RootLayout({
@@ -17,8 +16,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className={`${inter.className} antialiased`}>{children}</body>
+    <html lang="ja">
+      <body className={`${notoSansJP.className} antialiased`}>{children}</body>
     </html>
   );
 }
