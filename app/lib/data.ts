@@ -1,125 +1,238 @@
-import { LatestPost } from './definitions';
+import { sql } from '@vercel/postgres';
+import {
+  CustomerField,
+  CustomersTableType,
+  InvoiceForm,
+  InvoicesTable,
+  LatestInvoiceRaw,
+  User,
+  Revenue,
+} from './definitions';
+import { formatCurrency } from './utils';
 import { unstable_noStore as noStore } from 'next/cache';
-import { agent } from '@/app/lib/api';
-import { auth } from '@/auth';
-import { ViewImage } from '@atproto/api/dist/client/types/app/bsky/embed/images';
 
-export async function fetchLatestPosts() {
+export async function fetchRevenue() {
+  // Add noStore() here to prevent the response from being cached.
+  // This is equivalent to in fetch(..., {cache: 'no-store'}).
   noStore();
+
   try {
-    // TODO:別コンポーネントのログイン状態をキープできない・・
-    // if (agent.hasSession) {
-    //   console.log("セッションあり");
-    // } else {
-    //   console.log("セッションなしのため再ログイン");
-    //   const session = await auth();
-    //   await agent.login({ identifier: session?.user?.email || "", password: session?.user?.app_password || "" });
-    // }
-    const session = await auth();
-    await agent.login({ identifier: session?.user?.email || "", password: session?.user?.app_password || "" });
+    // Artificially delay a response for demo purposes.
+    // Don't do this in production :)
 
-    // const tl = await agent.getTimeline({ limit : 5 });
-    const tl = await agent.getAuthorFeed({ actor : session?.user.id || "" });
-    const feed = tl.data.feed;
-    
-    const latestPosts = [];
-    for (const [key, value] of Object.entries(feed)) {
-      let text = "";
-      let createdAt = "";
-      for (const [key, val] of Object.entries(value.post.record)) {
-        if (key === "text") {
-          text = val as string;
-        } else if (key === "createdAt") {
-          createdAt = val as string;
-        }
-      }
+    console.log('Fetching revenue data...');
+    await new Promise((resolve) => setTimeout(resolve, 3000));
 
-      const images = value.post.embed?.images as ViewImage[];
-      const latestPost : LatestPost = {
-        image_url: value.post.author.avatar || "",
-        displayName: value.post.author.displayName || "",
-        handle: value.post.author.handle || "",
-        text: text || "",
-        createdAt: new Date(createdAt).toLocaleString(),
-        embedImage: (images && images.length !== 0) ? images[0].fullsize || "" : "",
-        thumbImage: (images && images.length !== 0) ? images[0].thumb || "" : "",
-      };
-      latestPosts.push(latestPost);
-    }
+    const data = await sql<Revenue>`SELECT * FROM revenue`;
 
-    return latestPosts;
+    console.log('Data fetch completed after 3 seconds.');
+
+    return data.rows;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch the latest posts.');
+    throw new Error('Failed to fetch revenue data.');
+  }
+}
+
+export async function fetchLatestInvoices() {
+  noStore();
+  try {
+    const data = await sql<LatestInvoiceRaw>`
+      SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
+      FROM invoices
+      JOIN customers ON invoices.customer_id = customers.id
+      ORDER BY invoices.date DESC
+      LIMIT 5`;
+
+    const latestInvoices = data.rows.map((invoice) => ({
+      ...invoice,
+      amount: formatCurrency(invoice.amount),
+    }));
+    return latestInvoices;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch the latest invoices.');
   }
 }
 
 export async function fetchCardData() {
   noStore();
   try {
-    const session = await auth();
-    await agent.login({ identifier: session?.user?.email || "", password: session?.user?.app_password || "" });
+    // You can probably combine these into a single SQL query
+    // However, we are intentionally splitting them to demonstrate
+    // how to initialize multiple queries in parallel with JS.
+    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
+    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
+    const invoiceStatusPromise = sql`SELECT
+         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
+         SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
+         FROM invoices`;
 
-    const followers = await agent.getFollowers({ actor: agent.session?.did || "" });
-    const followersList = followers.data.followers;
-    
-    const follows = await agent.getFollows({ actor: agent.session?.did || "" });
-    const followsList = follows.data.follows;
+    const data = await Promise.all([
+      invoiceCountPromise,
+      customerCountPromise,
+      invoiceStatusPromise,
+    ]);
 
-    const { data } = await agent.getProfile({ actor: agent.session?.did || "" });
-    
-    const numberOfFollowers = followersList.length;
-    const numberOfFollowing = followsList.length;
-    const numberofPost = data.postsCount as number;
+    const numberOfInvoices = Number(data[0].rows[0].count ?? '0');
+    const numberOfCustomers = Number(data[1].rows[0].count ?? '0');
+    const totalPaidInvoices = formatCurrency(data[2].rows[0].paid ?? '0');
+    const totalPendingInvoices = formatCurrency(data[2].rows[0].pending ?? '0');
 
     return {
-      numberOfFollowers,
-      numberOfFollowing,
-      numberofPost,
+      numberOfCustomers,
+      numberOfInvoices,
+      totalPaidInvoices,
+      totalPendingInvoices,
     };
   } catch (error) {
-    console.log(error);
+    console.error('Database Error:', error);
     throw new Error('Failed to fetch card data.');
   }
 }
 
-export async function fetchFollowingPosts() {
+const ITEMS_PER_PAGE = 6;
+export async function fetchFilteredInvoices(
+  query: string,
+  currentPage: number,
+) {
   noStore();
+  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+
   try {
-    const session = await auth();
-    await agent.login({ identifier: session?.user?.email || "", password: session?.user?.app_password || "" });
+    const invoices = await sql<InvoicesTable>`
+      SELECT
+        invoices.id,
+        invoices.amount,
+        invoices.date,
+        invoices.status,
+        customers.name,
+        customers.email,
+        customers.image_url
+      FROM invoices
+      JOIN customers ON invoices.customer_id = customers.id
+      WHERE
+        customers.name ILIKE ${`%${query}%`} OR
+        customers.email ILIKE ${`%${query}%`} OR
+        invoices.amount::text ILIKE ${`%${query}%`} OR
+        invoices.date::text ILIKE ${`%${query}%`} OR
+        invoices.status ILIKE ${`%${query}%`}
+      ORDER BY invoices.date DESC
+      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
+    `;
 
-    const tl = await agent.getTimeline({ limit : 15});
-    const feed = tl.data.feed;
-    
-    const latestPosts = [];
-    for (const [key, value] of Object.entries(feed)) {
-      let text = "";
-      let createdAt = "";
-      for (const [key, val] of Object.entries(value.post.record)) {
-        if (key === "text") {
-          text = val as string;
-        } else if (key === "createdAt") {
-          createdAt = val as string;
-        }
-      }
-
-      const images = value.post.embed?.images as ViewImage[];
-      const latestPost : LatestPost = {
-        image_url: value.post.author.avatar || "",
-        displayName: value.post.author.displayName || "",
-        handle: value.post.author.handle || "",
-        text: text || "",
-        createdAt: new Date(createdAt).toLocaleString(),
-        embedImage: (images && images.length !== 0) ? images[0].fullsize || "" : "",
-        thumbImage: (images && images.length !== 0) ? images[0].thumb || "" : "",
-      };
-      latestPosts.push(latestPost);
-    }
-
-    return latestPosts;
+    return invoices.rows;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch the latest posts.');
+    throw new Error('Failed to fetch invoices.');
+  }
+}
+
+export async function fetchInvoicesPages(query: string) {
+  noStore();
+  try {
+    const count = await sql`SELECT COUNT(*)
+    FROM invoices
+    JOIN customers ON invoices.customer_id = customers.id
+    WHERE
+      customers.name ILIKE ${`%${query}%`} OR
+      customers.email ILIKE ${`%${query}%`} OR
+      invoices.amount::text ILIKE ${`%${query}%`} OR
+      invoices.date::text ILIKE ${`%${query}%`} OR
+      invoices.status ILIKE ${`%${query}%`}
+  `;
+
+    const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
+    return totalPages;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch total number of invoices.');
+  }
+}
+
+export async function fetchInvoiceById(id: string) {
+  noStore();
+  try {
+    const data = await sql<InvoiceForm>`
+      SELECT
+        invoices.id,
+        invoices.customer_id,
+        invoices.amount,
+        invoices.status
+      FROM invoices
+      WHERE invoices.id = ${id};
+    `;
+
+    const invoice = data.rows.map((invoice) => ({
+      ...invoice,
+      // Convert amount from cents to dollars
+      amount: invoice.amount / 100,
+    }));
+    console.log(invoice);
+    return invoice[0];
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch invoice.');
+  }
+}
+
+export async function fetchCustomers() {
+  try {
+    const data = await sql<CustomerField>`
+      SELECT
+        id,
+        name
+      FROM customers
+      ORDER BY name ASC
+    `;
+
+    const customers = data.rows;
+    return customers;
+  } catch (err) {
+    console.error('Database Error:', err);
+    throw new Error('Failed to fetch all customers.');
+  }
+}
+
+export async function fetchFilteredCustomers(query: string) {
+  try {
+    const data = await sql<CustomersTableType>`
+		SELECT
+		  customers.id,
+		  customers.name,
+		  customers.email,
+		  customers.image_url,
+		  COUNT(invoices.id) AS total_invoices,
+		  SUM(CASE WHEN invoices.status = 'pending' THEN invoices.amount ELSE 0 END) AS total_pending,
+		  SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END) AS total_paid
+		FROM customers
+		LEFT JOIN invoices ON customers.id = invoices.customer_id
+		WHERE
+		  customers.name ILIKE ${`%${query}%`} OR
+        customers.email ILIKE ${`%${query}%`}
+		GROUP BY customers.id, customers.name, customers.email, customers.image_url
+		ORDER BY customers.name ASC
+	  `;
+
+    const customers = data.rows.map((customer) => ({
+      ...customer,
+      total_pending: formatCurrency(customer.total_pending),
+      total_paid: formatCurrency(customer.total_paid),
+    }));
+
+    return customers;
+  } catch (err) {
+    console.error('Database Error:', err);
+    throw new Error('Failed to fetch customer table.');
+  }
+}
+
+export async function getUser(email: string) {
+  try {
+    const user = await sql`SELECT * FROM users WHERE email=${email}`;
+    return user.rows[0] as User;
+  } catch (error) {
+    console.error('Failed to fetch user:', error);
+    throw new Error('Failed to fetch user.');
   }
 }
